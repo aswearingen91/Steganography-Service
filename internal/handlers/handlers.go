@@ -53,7 +53,6 @@ func (h *Handler) EncodeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Require form-data max 50MB
 	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
 	if err := r.ParseMultipartForm(50 << 20); err != nil {
 		log.Println("[encode] could not parse multipart:", err)
@@ -111,7 +110,7 @@ func (h *Handler) EncodeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // -------------------------
-// DecodeHandler (multipart/form-data)
+// DecodeHandler (multipart/form-data) with better error
 // -------------------------
 func (h *Handler) DecodeHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("[decode] start")
@@ -154,10 +153,22 @@ func (h *Handler) DecodeHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[decode] image format=%s", format)
 
+	// Extract hidden message
 	payload, err := steg.ExtractBytes(img)
 	if err != nil {
 		log.Println("[decode] extract failed:", err)
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "extract failed: " + err.Error()})
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{
+			Error: "extract failed: " + err.Error(),
+		})
+		return
+	}
+
+	// 🔥 Option 2: Warn user if they used the wrong decode option
+	if len(payload) == 0 {
+		log.Println("[decode] no hidden message found")
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{
+			Error: "no hidden message found — make sure you selected the *Steganography* decode option (not normal image decode)",
+		})
 		return
 	}
 

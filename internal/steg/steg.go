@@ -66,84 +66,47 @@ func ExtractBytes(src image.Image) ([]byte, error) {
 	rgba := image.NewRGBA(b)
 	draw.Draw(rgba, b, src, b.Min, draw.Src)
 
-	// We'll first extract the 8-byte length prefix (64 bits).
-	totalPixels := rgba.Bounds().Dx() * rgba.Bounds().Dy()
-	totalBits := totalPixels * 3
+	// Flatten all LSBs into a bit slice
+	var bits []uint8
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			offset := rgba.PixOffset(x, y)
+			for ch := 0; ch < 3; ch++ { // R,G,B only
+				bits = append(bits, rgba.Pix[offset+ch]&1)
+			}
+		}
+	}
 
-	if totalBits < 64 {
+	if len(bits) < 64 {
 		return nil, errors.New("image too small to contain length header")
 	}
 
-	// Read first 64 bits to get length
-	readBits := func(nbits int) ([]byte, error) {
-		out := make([]byte, (nbits+7)/8)
-		bitIdx := 0
-		for y := rgba.Rect.Min.Y; y < rgba.Rect.Max.Y; y++ {
-			for x := rgba.Rect.Min.X; x < rgba.Rect.Max.X; x++ {
-				offset := rgba.PixOffset(x, y)
-				for ch := 0; ch < 3; ch++ {
-					if bitIdx >= nbits {
-						return out, nil
-					}
-					byteIdx := bitIdx / 8
-					bitInByte := 7 - (bitIdx % 8)
-					b := (rgba.Pix[offset+ch] & 1)
-					out[byteIdx] |= byte(b) << bitInByte
-					bitIdx++
-				}
-			}
+	// Read first 64 bits as payload length
+	var lenBytes [8]byte
+	for i := 0; i < 8; i++ {
+		var bval byte
+		for j := 0; j < 8; j++ {
+			bval = (bval << 1) | bits[i*8+j]
 		}
-		if bitIdx < nbits {
-			return nil, errors.New("not enough bits")
-		}
-		return out, nil
+		lenBytes[i] = bval
 	}
+	payloadLen := bytesToUint64(lenBytes[:])
 
-	lenBytes, err := readBits(64)
-	if err != nil {
-		return nil, err
-	}
-	payloadLen := bytesToUint64(lenBytes)
-
-	neededBits := int(payloadLen) * 8
-	if 64+neededBits > totalBits {
+	if int(payloadLen)*8 > len(bits)-64 {
 		return nil, errors.New("declared payload longer than capacity")
 	}
 
-	// Now read payload bits (starting after first 64 bits)
-	out := make([]byte, payloadLen)
-	bitIdx := 64 // already consumed
-	bytePos := 0
-	bitInBytePos := 7
-
-	for y := rgba.Rect.Min.Y; y < rgba.Rect.Max.Y; y++ {
-		for x := rgba.Rect.Min.X; x < rgba.Rect.Max.X; x++ {
-			offset := rgba.PixOffset(x, y)
-			for ch := 0; ch < 3; ch++ {
-				if bitIdx >= 64+neededBits {
-					return out, nil
-				}
-				// skip the first 64 bits
-				if bitIdx < 64 {
-					bitIdx++
-					continue
-				}
-				bit := int(rgba.Pix[offset+ch] & 1)
-				out[bytePos] |= byte(bit) << uint(bitInBytePos)
-				bitInBytePos--
-				if bitInBytePos < 0 {
-					bytePos++
-					bitInBytePos = 7
-				}
-				bitIdx++
-			}
+	// Read payload bits
+	payload := make([]byte, payloadLen)
+	for i := uint64(0); i < payloadLen; i++ {
+		var bval byte
+		for j := 0; j < 8; j++ {
+			bval = (bval << 1) | bits[64+i*8+uint64(j)]
 		}
+		payload[i] = bval
 	}
-	if bytePos != int(payloadLen) {
-		// it's possible if last byte was filled exactly, bytePos == payloadLen
-		return out, nil
-	}
-	return out, nil
+
+	return payload, nil
 }
 
 // helpers
