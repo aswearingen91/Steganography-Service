@@ -13,6 +13,12 @@ import (
 var logLevel = getLogLevel()
 
 func main() {
+	port := os.Getenv("PORT")
+
+	if port == "" {
+		port = "8080"
+	}
+
 	h := handlers.NewHandler()
 
 	mux := http.NewServeMux()
@@ -27,7 +33,7 @@ func main() {
 	})))
 
 	srv := &http.Server{
-		Addr:         ":8080",
+		Addr:         port,
 		Handler:      loggingMiddleware(mux),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 60 * time.Second,
