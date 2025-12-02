@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
-	"strings"
+
+	_ "image/jpeg" // Register JPEG decoder
+	_ "image/png"  // Register PNG decoder
 
 	"github.com/aswearingen91/Steganography-Service/internal/steg"
 )
@@ -17,22 +20,9 @@ func NewHandler() *Handler {
 	return &Handler{}
 }
 
-// -------------------------
-// Request/Response structs
-// -------------------------
-
-type EncodeRequest struct {
-	Image   string `json:"image"`   // base64 (NO prefix)
-	Message string `json:"message"` // text to embed
-}
-
 type EncodeResponse struct {
 	ImageBase64 string `json:"imageBase64"`
 	Filename    string `json:"filename"`
-}
-
-type DecodeRequest struct {
-	Image string `json:"image"` // base64 (NO prefix)
 }
 
 type DecodeResponse struct {
@@ -43,7 +33,9 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-// helper: JSON response
+// -------------------------
+// Helper: JSON response
+// -------------------------
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -51,7 +43,7 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 }
 
 // -------------------------
-// EncodeHandler
+// EncodeHandler (multipart/form-data)
 // -------------------------
 func (h *Handler) EncodeHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("[encode] start")
@@ -61,33 +53,50 @@ func (h *Handler) EncodeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req EncodeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid JSON: " + err.Error()})
+	// Require form-data max 50MB
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+	if err := r.ParseMultipartForm(50 << 20); err != nil {
+		log.Println("[encode] could not parse multipart:", err)
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid multipart form: " + err.Error()})
 		return
 	}
 
-	if strings.TrimSpace(req.Message) == "" {
+	message := r.FormValue("message")
+	if message == "" {
+		log.Println("[encode] blank message")
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "message cannot be blank"})
 		return
 	}
 
-	imgData, err := base64.StdEncoding.DecodeString(req.Image)
+	file, header, err := r.FormFile("image")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid base64: " + err.Error()})
+		log.Println("[encode] missing image file:", err)
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "missing image file: " + err.Error()})
+		return
+	}
+	defer file.Close()
+
+	log.Printf("[encode] received file: %s (%d bytes)", header.Filename, header.Size)
+
+	imgBytes, err := io.ReadAll(file)
+	if err != nil {
+		log.Println("[encode] failed to read image:", err)
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "could not read image: " + err.Error()})
 		return
 	}
 
-	img, format, err := steg.DecodeImageFromReader(bytes.NewReader(imgData))
+	img, format, err := steg.DecodeImageFromReader(bytes.NewReader(imgBytes))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "could not read image: " + err.Error()})
+		log.Println("[encode] decode failed:", err)
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "could not decode image: " + err.Error()})
 		return
 	}
 
 	log.Printf("[encode] image format=%s", format)
 
-	outPNG, err := steg.EmbedBytes(img, []byte(req.Message))
+	outPNG, err := steg.EmbedBytes(img, []byte(message))
 	if err != nil {
+		log.Println("[encode] embed failed:", err)
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "steganography failed: " + err.Error()})
 		return
 	}
@@ -102,7 +111,7 @@ func (h *Handler) EncodeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // -------------------------
-// DecodeHandler
+// DecodeHandler (multipart/form-data)
 // -------------------------
 func (h *Handler) DecodeHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("[decode] start")
@@ -112,20 +121,33 @@ func (h *Handler) DecodeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req DecodeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid JSON: " + err.Error()})
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+	if err := r.ParseMultipartForm(50 << 20); err != nil {
+		log.Println("[decode] parse multipart failed:", err)
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid multipart form: " + err.Error()})
 		return
 	}
 
-	imgData, err := base64.StdEncoding.DecodeString(req.Image)
+	file, header, err := r.FormFile("image")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid base64: " + err.Error()})
+		log.Println("[decode] missing file:", err)
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "missing image file: " + err.Error()})
+		return
+	}
+	defer file.Close()
+
+	log.Printf("[decode] received file: %s (%d bytes)", header.Filename, header.Size)
+
+	imgBytes, err := io.ReadAll(file)
+	if err != nil {
+		log.Println("[decode] failed to read image:", err)
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "could not read image: " + err.Error()})
 		return
 	}
 
-	img, format, err := steg.DecodeImageFromReader(bytes.NewReader(imgData))
+	img, format, err := steg.DecodeImageFromReader(bytes.NewReader(imgBytes))
 	if err != nil {
+		log.Println("[decode] decode failed:", err)
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "could not decode image: " + err.Error()})
 		return
 	}
@@ -134,11 +156,11 @@ func (h *Handler) DecodeHandler(w http.ResponseWriter, r *http.Request) {
 
 	payload, err := steg.ExtractBytes(img)
 	if err != nil {
+		log.Println("[decode] extract failed:", err)
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "extract failed: " + err.Error()})
 		return
 	}
 
-	message := string(payload)
-	writeJSON(w, http.StatusOK, DecodeResponse{Message: message})
+	writeJSON(w, http.StatusOK, DecodeResponse{Message: string(payload)})
 	log.Println("[decode] success")
 }
