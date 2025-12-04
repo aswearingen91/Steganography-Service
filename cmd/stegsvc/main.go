@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -33,7 +34,7 @@ func main() {
 	})))
 
 	srv := &http.Server{
-		Addr:         port,
+		Addr:         fmt.Sprintf(":%s", port),
 		Handler:      loggingMiddleware(mux),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 60 * time.Second,
